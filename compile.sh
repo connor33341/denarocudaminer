@@ -34,6 +34,15 @@ fi
 
 echo "Compiling Nim manager..."
 # Compile Nim manager
+# Ensure nimble and required Nim packages are installed
+if command -v nimble &> /dev/null; then
+    echo "Installing nim dependencies (nimcrypto)..."
+    # install nimcrypto non-interactively; if it fails we'll continue so nim c can report errors
+    nimble install -y nimcrypto || echo "Warning: nimble install failed or was skipped. If compilation still fails, install nimcrypto manually (nimble install nimcrypto)."
+else
+    echo "nimble not found; skipping automatic nim package installation. If you get missing module errors, install nimble and run: nimble install nimcrypto"
+fi
+
 nim c -d:release -d:ssl -o:build/manager src/manager.nim
 
 # Check if Nim compilation was successful

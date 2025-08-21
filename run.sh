@@ -37,10 +37,10 @@ echo ""
 
 # Change to build directory and create symlink for cuda_miner.exe if it doesn't exist
 cd build
-if [ ! -f "cuda_miner.exe" ] && [ ! -L "cuda_miner.exe" ]; then
-    ln -s cuda_miner cuda_miner.exe
-    echo "Created symlink cuda_miner.exe -> cuda_miner"
-fi
+#if [ ! -f "cuda_miner.exe" ] && [ ! -L "cuda_miner.exe" ]; then
+#    ln -s cuda_miner cuda_miner.exe
+#    echo "Created symlink cuda_miner.exe -> cuda_miner"
+#fi
 
 # Run the manager with the provided arguments
 ./manager "$NODE_URL" "$WALLET_ADDRESS"
