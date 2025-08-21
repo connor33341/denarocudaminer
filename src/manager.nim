@@ -66,13 +66,13 @@ type Result = ref object of RootObj
     pending_transactions*: seq[string]
 
 proc run_cuda(prefix: string, difficulty: int, charset: string, lbh_chunk: string): uint32 =
-    var result = execCmdEx(fmt".\cuda_miner {lbh_chunk} {charset} {prefix} {difficulty}")
+    var result = execCmdEx(fmt"./cuda_miner {lbh_chunk} {charset} {prefix} {difficulty}")
     var nonce = result[0].strip()
     echo nonce
     uint32(parseUInt(nonce))
 
 proc nrun_cuda(prefix: string, difficulty: int, charset: string, lbh_chunk: string) =
-    discard execCmd(fmt".\cuda_miner {lbh_chunk} {charset} {prefix} {difficulty}")
+    discard execCmd(fmt"./cuda_miner {lbh_chunk} {charset} {prefix} {difficulty}")
 
 while true:
     echo "Getting new block..."
