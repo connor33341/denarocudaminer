@@ -9,6 +9,19 @@ let args = commandLineParams()
 let node = string(args[0])
 let address = string(args[1])
 
+proc stringToBytes(address: string): seq[byte] =
+    # Try hex first, then fall back to base58 using python
+    try:
+        result = cast[seq[byte]](address.parseHexStr())
+    except:
+        # Use python to decode base58
+        let cmd = "python3 -c \"import base58; print(base58.b58decode('" & address & "').hex())\""
+        let (output, exit_code) = execCmdEx(cmd)
+        if exit_code == 0:
+            result = cast[seq[byte]](output.strip().parseHexStr())
+        else:
+            raise newException(ValueError, "Failed to decode address")
+
 proc getMiningInfo(client: HttpClient, node: string): JsonNode =
     parseJson(client.getContent(fmt"{node}/get_mining_info"))
 
@@ -28,9 +41,6 @@ proc int16ToBytes(x: int16): seq[byte] =
 
 proc hexToBytesSeq(hex: string): seq[byte] =
     @(MDigest[256].fromHex(hex).data)
-
-proc hexToBytesSeq64(hex: string): seq[byte] =
-    @(MDigest[512].fromHex(hex).data)
 
 proc getTransactionsMerkleTree(transactions: seq[string]): MDigest[256] =
     var bytes = newSeq[byte]()
@@ -66,9 +76,15 @@ type Result = ref object of RootObj
     pending_transactions*: seq[string]
 
 proc run_cuda(prefix: string, difficulty: int, charset: string, lbh_chunk: string): uint32 =
+    echo fmt"Calling CUDA miner with:"
+    echo fmt"  lbh_chunk: {lbh_chunk}"
+    echo fmt"  charset: {charset}"  
+    echo fmt"  prefix: {prefix} (length: {prefix.len})"
+    echo fmt"  difficulty: {difficulty}"
     var result = execCmdEx(fmt"./cuda_miner {lbh_chunk} {charset} {prefix} {difficulty}")
     var nonce = result[0].strip()
-    echo nonce
+    echo fmt"CUDA miner output: {nonce}"
+    echo fmt"CUDA miner stderr: {result[1]}"
     uint32(parseUInt(nonce))
 
 proc nrun_cuda(prefix: string, difficulty: int, charset: string, lbh_chunk: string) =
@@ -85,9 +101,16 @@ while true:
 
     echo fmt"Starting mining of block {mining_info.last_block.id + 1} with difficulty {difficulty}"
 
-    let prefix = hexToBytesSeq(mining_info.last_block.hash) & hexToBytesSeq64(address) & @(getTransactionsMerkleTree(pending_transactions).data) & uint32ToBytes(uint32(now().utc.toTime().toUnix())) & int16ToBytes(int16(difficulty * 10))
-    if prefix.len() != 134:
-        echo "Invalid prefix length"
+    let address_bytes = stringToBytes(address)
+    var prefix = hexToBytesSeq(mining_info.last_block.hash) & address_bytes & @(getTransactionsMerkleTree(pending_transactions).data) & uint32ToBytes(uint32(now().utc.toTime().toUnix())) & int16ToBytes(int16(difficulty * 10))
+    
+    # Add leading byte if address is 33 bytes (compressed public key)
+    if address_bytes.len == 33:
+        prefix = @[byte(2)] & prefix
+    
+    echo fmt"Prefix length: {prefix.len()}"
+    if prefix.len() != 103 and prefix.len() != 104:
+        echo fmt"Invalid prefix length: {prefix.len()}"
         continue
     let cache = buildCache(difficulty, mining_info.last_block.hash)
     var client = newHttpClient()
