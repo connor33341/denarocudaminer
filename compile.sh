@@ -17,6 +17,25 @@ if ! command -v nim &> /dev/null; then
     exit 1
 fi
 
+# Check if Python 3 is available
+if ! command -v python3 &> /dev/null; then
+    echo "Error: python3 not found. Please install Python 3."
+    exit 1
+fi
+
+# Install Python requirements
+echo "Installing Python requirements..."
+if [ -f "requirements.txt" ]; then
+    python3 -m pip install -r requirements.txt
+    if [ $? -eq 0 ]; then
+        echo "Python requirements installed successfully!"
+    else
+        echo "Warning: Failed to install some Python requirements. The base58 decoder may not work."
+    fi
+else
+    echo "Warning: requirements.txt not found. Skipping Python package installation."
+fi
+
 # Create build directory if it doesn't exist
 mkdir -p build
 

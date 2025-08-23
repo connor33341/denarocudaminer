@@ -1,4 +1,5 @@
 build
+__pycache__
 # Python refrence files
-*.py
+cuda_miner_standalone.py
 test_base58*

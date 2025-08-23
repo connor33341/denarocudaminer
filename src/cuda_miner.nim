@@ -27,9 +27,9 @@
 ## This is a complete rewrite of the Python cuda_miner_standalone.py in Nim,
 ## providing the same functionality with better performance and integration.
 ## 
-## TODO: FIX THAT PIECE OF SHIT BASE58 DECODER
+## Base58 decoding is handled by calling Python's base58 package for reliability.
 
-import std/[httpclient, json, strformat, times, math, strutils, os, parseopt, algorithm]
+import std/[httpclient, json, strformat, times, math, strutils, os, parseopt, algorithm, osproc]
 import nimcrypto
 import cuda_wrapper
 
@@ -62,58 +62,23 @@ type
     pendingTransactions: seq[string]
     merkleRoot: string
 
-proc base58Decode(input: string): seq[byte] =
-  ## Simple base58 decoder implementation
-  const alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+proc base58DecodePython(input: string): seq[byte] =
+  ## Base58 decoder using Python base58 package (reliable implementation)
+  let currentDir = getCurrentDir()
+  let pythonScript = currentDir / "src" / "base58_decoder.py"
   
-  # Count leading zeros (represented as '1' in base58)
-  var leading_zeros = 0
-  for c in input:
-    if c == '1':
-      leading_zeros += 1
-    else:
-      break
+  # Call Python script to decode base58
+  let (output, exitCode) = execCmdEx(fmt"python3 {pythonScript} {input}")
   
-  # Convert to big integer (using seq[byte] arithmetic)
-  var decoded: seq[byte] = @[0]
+  if exitCode != 0:
+    raise newException(ValueError, fmt"Python base58 decode failed: {output}")
   
-  for i in leading_zeros..<input.len:
-    let char = input[i]
-    let pos = alphabet.find(char)
-    if pos == -1:
-      raise newException(ValueError, "Invalid base58 character")
-    
-    # Multiply current result by 58
-    var carry = 0
-    for j in countdown(decoded.len - 1, 0):
-      let temp = int(decoded[j]) * 58 + carry
-      decoded[j] = byte(temp mod 256)
-      carry = temp div 256
-    
-    while carry > 0:
-      decoded.add(byte(carry mod 256))
-      carry = carry div 256
-    
-    # Add the current digit
-    carry = pos
-    for j in countdown(decoded.len - 1, 0):
-      let temp = int(decoded[j]) + carry
-      decoded[j] = byte(temp mod 256)
-      carry = temp div 256
-      if carry == 0:
-        break
-    
-    while carry > 0:
-      decoded.add(byte(carry mod 256))
-      carry = carry div 256
-  
-  # Add leading zeros
-  for i in 0..<leading_zeros:
-    decoded.add(0)
-  
-  # Reverse to get correct byte order
-  decoded.reverse()
-  return decoded
+  # Parse hex output from Python script
+  let hexResult = output.strip()
+  try:
+    result = cast[seq[byte]](hexResult.parseHexStr())
+  except:
+    raise newException(ValueError, fmt"Failed to parse Python base58 decode result: {hexResult}")
 
 proc stringToBytes(address: string): seq[byte] =
   ## Convert address (hex or base58) to bytes
@@ -121,21 +86,11 @@ proc stringToBytes(address: string): seq[byte] =
     # First try hex decode
     result = cast[seq[byte]](address.parseHexStr())
   except:
-    # For this specific address, use the known correct result from Python base58
-    if address == "Dn7FpuuLTkAXTbSDuQALMSQVzy4Mp1RWc69ZnddciNa7o":
-      # Python base58.b58decode result: 2b037e42dc411b1cf44dc6a999f313b34f3bebd648b28576294a38bf60271764e6
-      result = cast[seq[byte]]("2b037e42dc411b1cf44dc6a999f313b34f3bebd648b28576294a38bf60271764e6".parseHexStr())
-    else:
-      try:
-        # If hex fails, try base58 decode (but it's broken)
-        let decoded = base58Decode(address)
-        # For now, truncate to 33 bytes if longer (our decoder seems to produce extra bytes)
-        if decoded.len > 33:
-          result = decoded[0..<33]  # Take first 33 bytes
-        else:
-          result = decoded
-      except:
-        raise newException(ValueError, "Failed to decode address as hex or base58")
+    try:
+      # If hex fails, try base58 decode using Python
+      result = base58DecodePython(address)
+    except:
+      raise newException(ValueError, "Failed to decode address as hex or base58")
 
 proc buildPrefix(lastBlockHashHex: string, addressBytes: seq[byte], merkleRootHex: string, difficulty: float): seq[byte] =
   ## Build constant block prefix (no nonce). Matches Python miner exactly.
