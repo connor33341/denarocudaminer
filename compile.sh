@@ -1,9 +1,9 @@
 #!/bin/bash
 
-# Compilation script for Denaro CUDA Miner
+# Compilation script for Integrated Nim CUDA Miner
 set -e
 
-echo "Starting compilation of Denaro CUDA Miner..."
+echo "Starting compilation of Integrated Nim CUDA Miner..."
 
 # Check if nvcc is available
 if ! command -v nvcc &> /dev/null; then
@@ -20,20 +20,19 @@ fi
 # Create build directory if it doesn't exist
 mkdir -p build
 
-echo "Compiling CUDA miner..."
-# Compile CUDA kernel
-nvcc -o build/cuda_miner src/cuda_miner/kernel.cu -lcuda -arch=sm_50 -O3
+echo "Compiling CUDA library..."
+# Compile CUDA library as shared library for Nim FFI
+nvcc -shared -Xcompiler -fPIC -o build/libcuda_miner.so src/cuda_miner_lib.cu -lcuda -lcudart -arch=sm_86 -O3
 
 # Check if CUDA compilation was successful
 if [ $? -eq 0 ]; then
-    echo "CUDA miner compiled successfully!"
+    echo "CUDA library compiled successfully!"
 else
     echo "Error: CUDA compilation failed!"
     exit 1
 fi
 
-echo "Compiling Nim manager..."
-# Compile Nim manager
+echo "Compiling Nim CUDA miner..."
 # Ensure nimble and required Nim packages are installed
 if command -v nimble &> /dev/null; then
     echo "Installing nim dependencies (nimcrypto)..."
@@ -43,17 +42,20 @@ else
     echo "nimble not found; skipping automatic nim package installation. If you get missing module errors, install nimble and run: nimble install nimcrypto"
 fi
 
-nim c -d:release -d:ssl -o:build/manager src/manager.nim
+# Compile Nim miner with CUDA library linking
+nim c -d:release -d:ssl --passL:"-L./build -lcuda_miner -L/usr/local/cuda/lib64 -lcudart" -o:build/cuda_miner src/cuda_miner.nim
 
 # Check if Nim compilation was successful
 if [ $? -eq 0 ]; then
-    echo "Nim manager compiled successfully!"
+    echo "Nim CUDA miner compiled successfully!"
 else
     echo "Error: Nim compilation failed!"
     exit 1
 fi
 
 echo "Compilation completed successfully!"
-echo "Executables are in the build/ directory:"
-echo "  - build/cuda_miner (CUDA mining kernel)"
-echo "  - build/manager (Nim manager)"
+echo "Executable is in the build/ directory:"
+echo "  - build/cuda_miner (Integrated Nim CUDA miner)"
+echo ""
+echo "Usage: ./build/cuda_miner --address <your_address> --node <node_url>"
+echo "Example: ./build/cuda_miner --address Dn7FpuuLTkAXTbSDuQALMSQVzy4Mp1RWc69ZnddciNa7o --node https://stellaris-node.connor33341.dev/"

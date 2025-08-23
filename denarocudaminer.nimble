@@ -6,7 +6,8 @@ description   = "Denaro CUDA miner manager and helper"
 requires "nim >= 1.6.0"
 # Runtime dependencies
 deps = @[
-  "nimcrypto"
+  "nimcrypto",
+  #"nbaser" # they say, why do you hate? I answer, base58 on nim
 ]
 
 # No build action required here; compile.sh handles building

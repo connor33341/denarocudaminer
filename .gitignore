@@ -1,1 +1,3 @@
 build
+# Python refrence files
+*.py
