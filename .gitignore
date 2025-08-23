@@ -1,3 +1,4 @@
 build
 # Python refrence files
 *.py
+test_base58*

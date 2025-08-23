@@ -108,3 +108,4 @@ Files of interest:
 
 See `LICENSE` in the repository root for license terms.
 
+## TODO: FIX THAT PIECE OF .... BASE58 DECODER
