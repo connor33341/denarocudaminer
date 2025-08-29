@@ -34,7 +34,7 @@ import nimcrypto
 import cuda_wrapper
 
 const
-  WORKER_REFRESH_SECONDS = 90
+  WORKER_REFRESH_SECONDS = 190
   DEFAULT_NODE_URL = "https://stellaris-node.connor33341.dev/"
   
   STATUS_PENDING = 0
@@ -263,6 +263,8 @@ proc main() =
   
   let client = newHttpClient()
   var minedBlocksCount = 0
+  var currentBlockId = -1  # Track current block being mined
+  var batchIdx = 0         # Persist batch index across mining info refreshes
   
   while true:
     # Fetch mining info
@@ -282,6 +284,12 @@ proc main() =
     let txs = miningInfo.pendingTransactions
     let merkleRootHex = miningInfo.merkleRoot
     
+    # Reset batch index if we're starting to mine a new block
+    if currentBlockId != lastBlockId:
+      currentBlockId = lastBlockId
+      batchIdx = 0
+      echo fmt"Starting work on new block {lastBlockId + 1}"
+    
     var addressBytes: seq[byte]
     try:
       addressBytes = stringToBytes(config.address)
@@ -300,7 +308,6 @@ proc main() =
     
     # Search parameters for single worker
     let startTime = epochTime()
-    var batchIdx = 0
     var foundNonce: uint32 = uint32(0xFFFFFFFF)
     
     while (epochTime() - startTime) < WORKER_REFRESH_SECONDS:
