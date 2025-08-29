@@ -261,12 +261,23 @@ proc main() =
     quit(1)
   echo "CUDA initialized successfully!"
   
-  let client = newHttpClient()
+  var client = newHttpClient()
   var minedBlocksCount = 0
   var currentBlockId = -1  # Track current block being mined
   var batchIdx = 0         # Persist batch index across mining info refreshes
+  const MAX_BATCH_IDX = 1000  # Reset batch index after this many attempts to prevent overflow
+  var clientRefreshCounter = 0
+  const CLIENT_REFRESH_INTERVAL = 500  # Refresh HTTP client every N mining attempts
   
   while true:
+    # Periodically refresh HTTP client to prevent connection issues
+    inc clientRefreshCounter
+    if clientRefreshCounter >= CLIENT_REFRESH_INTERVAL:
+      client.close()
+      client = newHttpClient()
+      clientRefreshCounter = 0
+      echo "Refreshed HTTP client connection"
+    
     # Fetch mining info
     echo "Fetching mining information from node..."
     var miningInfo: MiningInfo
@@ -284,11 +295,18 @@ proc main() =
     let txs = miningInfo.pendingTransactions
     let merkleRootHex = miningInfo.merkleRoot
     
-    # Reset batch index if we're starting to mine a new block
+    # Reset batch index if we're starting to mine a new block or if it gets too large
     if currentBlockId != lastBlockId:
       currentBlockId = lastBlockId
       batchIdx = 0
       echo fmt"Starting work on new block {lastBlockId + 1}"
+    elif batchIdx >= MAX_BATCH_IDX:
+      echo fmt"Resetting batch index after {batchIdx} attempts to prevent performance degradation"
+      batchIdx = 0
+    else:
+      # Add periodic progress indicator for long-running blocks
+      if batchIdx > 0 and batchIdx mod 50 == 0:
+        echo fmt"Mining attempt {batchIdx} on block {lastBlockId + 1}..."
     
     var addressBytes: seq[byte]
     try:
@@ -330,7 +348,7 @@ proc main() =
       inc batchIdx
     
     if foundNonce == uint32(0xFFFFFFFF):
-      echo "No solution in this window. Refreshing mining info..."
+      echo fmt"No solution in batch {batchIdx}. Refreshing mining info..."
       echo ""
       continue
     
