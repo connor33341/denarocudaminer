@@ -32,6 +32,7 @@
 import std/[httpclient, json, strformat, times, math, strutils, os, parseopt, algorithm, osproc]
 import nimcrypto
 import cuda_wrapper
+import benchmark
 
 const
   WORKER_REFRESH_SECONDS = 190
@@ -51,6 +52,8 @@ type
     threads: uint
     itersPerThread: uint
     gpuArch: string
+    enableBenchmark: bool
+    benchmarkOutput: string
 
   Block = object
     hash: string
@@ -65,7 +68,22 @@ type
 proc base58DecodePython(input: string): seq[byte] =
   ## Base58 decoder using Python base58 package (reliable implementation)
   let currentDir = getCurrentDir()
-  let pythonScript = currentDir / "src" / "base58_decoder.py"
+  
+  # Try multiple possible paths for the Python script
+  var pythonScript = ""
+  let possiblePaths = [
+    currentDir / "src" / "base58_decoder.py",           # From project root
+    currentDir / ".." / "src" / "base58_decoder.py",    # From benchmarks subdirectory
+    currentDir / "base58_decoder.py"                    # Direct path
+  ]
+  
+  for path in possiblePaths:
+    if fileExists(path):
+      pythonScript = path
+      break
+  
+  if pythonScript == "":
+    raise newException(ValueError, "Could not find base58_decoder.py script")
   
   # Call Python script to decode base58
   let (output, exitCode) = execCmdEx(fmt"python3 {pythonScript} {input}")
@@ -193,7 +211,9 @@ proc parseArgs(): MinerConfig =
     blocks: 1024,
     threads: 512,
     itersPerThread: 20000,
-    gpuArch: "sm_89"
+    gpuArch: "sm_89",
+    enableBenchmark: false,
+    benchmarkOutput: "benchmark"
   )
   
   var p = initOptParser()
@@ -210,15 +230,29 @@ proc parseArgs(): MinerConfig =
         if not result.nodeUrl.endsWith("/"):
           result.nodeUrl.add("/")
       of "m", "max-blocks":
+        if p.val == "":
+          raise newException(ValueError, fmt"Value required for --max-blocks option")
         result.maxBlocks = parseInt(p.val)
       of "blocks":
+        if p.val == "":
+          raise newException(ValueError, fmt"Value required for --blocks option")
         result.blocks = uint(parseInt(p.val))
       of "threads":
+        if p.val == "":
+          raise newException(ValueError, fmt"Value required for --threads option")
         result.threads = uint(parseInt(p.val))
       of "iters-per-thread":
+        if p.val == "":
+          raise newException(ValueError, fmt"Value required for --iters-per-thread option")
         result.itersPerThread = uint(parseInt(p.val))
       of "gpu-arch":
         result.gpuArch = p.val
+      of "benchmark":
+        result.enableBenchmark = true
+        if p.val != "":
+          result.benchmarkOutput = p.val
+      of "benchmark-output":
+        result.benchmarkOutput = p.val
       of "h", "help":
         echo """
 Integrated CUDA miner for Denaro/Stellaris blockchain
@@ -233,6 +267,8 @@ Options:
   --threads <N>                CUDA threads per block (default: 512)
   --iters-per-thread <N>       Iterations per thread per kernel batch (default: 20000)
   --gpu-arch <ARCH>            GPU architecture for compilation (default: sm_89)
+  --benchmark [NAME]           Enable benchmarking with optional session name
+  --benchmark-output <PATH>    Set output path for benchmark reports (default: benchmark)
   -h, --help                   Show this help message
 """
         quit(0)
@@ -253,6 +289,23 @@ proc main() =
   echo fmt"GPU architecture: {config.gpuArch}"
   if config.maxBlocks > 0:
     echo fmt"Will stop after mining {config.maxBlocks} block(s)."
+  
+  # Initialize benchmarking if enabled
+  if config.enableBenchmark:
+    let currentTime = now()
+    let sessionId = if config.benchmarkOutput == "benchmark": 
+      "mining_session_" & $currentTime.year & "-" & ($currentTime.month.int).align(2, '0') & "-" & ($currentTime.monthday).align(2, '0') & "_" & ($currentTime.hour).align(2, '0') & "-" & ($currentTime.minute).align(2, '0') & "-" & ($currentTime.second).align(2, '0')
+    else: 
+      config.benchmarkOutput
+    
+    let gpuConfig = GPUConfig(
+      blocks: config.blocks,
+      threads: config.threads,
+      itersPerThread: config.itersPerThread,
+      architecture: config.gpuArch
+    )
+    
+    initBenchmarkSession(sessionId, gpuConfig)
   
   # Initialize CUDA
   echo "Initializing CUDA..."
@@ -327,6 +380,7 @@ proc main() =
     # Search parameters for single worker
     let startTime = epochTime()
     var foundNonce: uint32 = uint32(0xFFFFFFFF)
+    var totalHashesThisAttempt: uint64 = 0
     
     while (epochTime() - startTime) < WORKER_REFRESH_SECONDS:
       # Launch CUDA kernel
@@ -341,11 +395,30 @@ proc main() =
         uint(batchIdx)
       )
       
+      # Calculate hashes for this batch
+      let hashesThisBatch = uint64(config.blocks * config.threads * config.itersPerThread)
+      totalHashesThisAttempt += hashesThisBatch
+      
       if nonce != uint32(0xFFFFFFFF):
         foundNonce = nonce
         break
       
       inc batchIdx
+    
+    let endTime = epochTime()
+    
+    # Record mining attempt for benchmarking
+    if config.enableBenchmark:
+      recordMiningAttempt(
+        lastBlockId,
+        startTime,
+        endTime, 
+        totalHashesThisAttempt,
+        difficulty,
+        foundNonce != uint32(0xFFFFFFFF),
+        foundNonce,
+        batchIdx
+      )
     
     if foundNonce == uint32(0xFFFFFFFF):
       echo fmt"No solution in batch {batchIdx}. Refreshing mining info..."
@@ -386,11 +459,33 @@ proc main() =
       echo "Block submission failed due to an error. Restarting with fresh data..."
       echo ""
       sleep(2000)
+  
+  # Finalize benchmarking session and generate reports
+  if config.enableBenchmark:
+    finalizeBenchmarkSession()
+    printBenchmarkSummary()
+    
+    let (jsonPath, htmlPath) = saveBenchmarkReports(config.benchmarkOutput)
+    echo fmt"💾 Benchmark reports saved:"
+    echo fmt"   JSON: {jsonPath}"
+    echo fmt"   HTML: {htmlPath}"
 
 when isMainModule:
   try:
     main()
-  except CatchableError:
+  except CatchableError as e:
     echo ""
+    echo fmt"ERROR: {e.msg}"
+    echo fmt"Exception type: {$e.name}"
     echo "Exiting miner."
+    
+    # Save benchmark reports even if exiting early
+    if isSessionActive:
+      finalizeBenchmarkSession()
+      printBenchmarkSummary()
+      let (jsonPath, htmlPath) = saveBenchmarkReports()
+      echo fmt"💾 Emergency benchmark reports saved:"
+      echo fmt"   JSON: {jsonPath}"
+      echo fmt"   HTML: {htmlPath}"
+    
     quit(0)

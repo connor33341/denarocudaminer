@@ -1,5 +1,6 @@
 build
 __pycache__
+benchmarks
 # Python refrence files
 cuda_miner_standalone.py
 test_base58*
