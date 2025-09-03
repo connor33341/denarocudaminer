@@ -42,6 +42,10 @@ const
   STATUS_SUCCESS = 1
   STATUS_STALE = 2
   STATUS_FAILED = 3
+  
+    # Developer fee configuration
+  DEFAULT_DEVELOPER_ADDRESS = "Dn7FpuuLTkAXTbSDuQALMSQVzy4Mp1RWc69ZnddciNa7o"  # Replace with actual developer address
+  DEFAULT_DEVELOPER_FEE_PERCENTAGE = 5.0  # 5% default
 
 type
   MinerConfig = object
@@ -54,6 +58,8 @@ type
     gpuArch: string
     enableBenchmark: bool
     benchmarkOutput: string
+    developerAddress: string
+    developerFeePercentage: float
 
   Block = object
     hash: string
@@ -136,6 +142,30 @@ proc buildPrefix(lastBlockHashHex: string, addressBytes: seq[byte], merkleRootHe
   if addressBytes.len == 33:
     result = @[byte(2)] & result
 
+proc calculateDeveloperFeeFrequency(percentage: float): int =
+  ## Calculate the frequency from percentage (e.g., 5% = every 20th block)
+  if percentage <= 0.0:
+    return 0  # No developer fees
+  elif percentage >= 100.0:
+    return 1  # Every block is a developer fee
+  else:
+    return int(ceil(100.0 / percentage))
+
+proc isDeveloperFeeBlock(blockId: int, frequency: int): bool =
+  ## Check if the given block ID should be mined to the developer address
+  if frequency <= 0:
+    return false
+  return (blockId + 1) mod frequency == 0
+
+proc getMiningAddress(config: MinerConfig, nextBlockId: int): string =
+  ## Get the address to use for mining the next block
+  let frequency = calculateDeveloperFeeFrequency(config.developerFeePercentage)
+  if isDeveloperFeeBlock(nextBlockId, frequency):
+    result = config.developerAddress
+    echo fmt"Block {nextBlockId + 1} will be mined to developer address ({config.developerFeePercentage}% fee, every {frequency} blocks)"
+  else:
+    result = config.address
+
 proc computeFractionalCharset(difficulty: float): (uint, string) =
   ## Returns (idiff, allowed_charset_lower)
   let decimal = difficulty mod 1.0
@@ -213,7 +243,9 @@ proc parseArgs(): MinerConfig =
     itersPerThread: 20000,
     gpuArch: "sm_89",
     enableBenchmark: false,
-    benchmarkOutput: "benchmark"
+    benchmarkOutput: "benchmark",
+    developerAddress: DEFAULT_DEVELOPER_ADDRESS,
+    developerFeePercentage: DEFAULT_DEVELOPER_FEE_PERCENTAGE
   )
   
   var p = initOptParser()
@@ -253,6 +285,12 @@ proc parseArgs(): MinerConfig =
           result.benchmarkOutput = p.val
       of "benchmark-output":
         result.benchmarkOutput = p.val
+      of "developer-address":
+        result.developerAddress = p.val
+      of "developer-fee-percentage":
+        if p.val == "":
+          raise newException(ValueError, fmt"Value required for --developer-fee-percentage option")
+        result.developerFeePercentage = parseFloat(p.val)
       of "h", "help":
         echo """
 Integrated CUDA miner for Denaro/Stellaris blockchain
@@ -269,6 +307,8 @@ Options:
   --gpu-arch <ARCH>            GPU architecture for compilation (default: sm_89)
   --benchmark [NAME]           Enable benchmarking with optional session name
   --benchmark-output <PATH>    Set output path for benchmark reports (default: benchmark)
+  --developer-address <ADDR>   Developer address for fee blocks (default: built-in)
+  --developer-fee-percentage <PCT> Developer fee percentage (default: 5.0, means every 20th block)
   -h, --help                   Show this help message
 """
         quit(0)
@@ -287,6 +327,8 @@ proc main() =
   echo fmt"Connecting to node: {config.nodeUrl}"
   echo fmt"GPU launch dims: blocks={config.blocks}, threads={config.threads}, iters_per_thread={config.itersPerThread}"
   echo fmt"GPU architecture: {config.gpuArch}"
+  let feeFrequency = calculateDeveloperFeeFrequency(config.developerFeePercentage)
+  echo fmt"Developer fee: {config.developerFeePercentage}% (every {feeFrequency} blocks to {config.developerAddress})"
   if config.maxBlocks > 0:
     echo fmt"Will stop after mining {config.maxBlocks} block(s)."
   
@@ -361,9 +403,12 @@ proc main() =
       if batchIdx > 0 and batchIdx mod 50 == 0:
         echo fmt"Mining attempt {batchIdx} on block {lastBlockId + 1}..."
     
+    # Determine which address to use for this block
+    let miningAddress = getMiningAddress(config, lastBlockId)
+    
     var addressBytes: seq[byte]
     try:
-      addressBytes = stringToBytes(config.address)
+      addressBytes = stringToBytes(miningAddress)
     except Exception as e:
       echo "ERROR converting address: ", e.msg
       continue
@@ -372,6 +417,7 @@ proc main() =
     echo fmt"New Block Number: {lastBlockId + 1}"
     echo fmt"Confirming {txs.len} transactions"
     echo fmt"Using Merkle Root provided by node: {merkleRootHex}"
+    echo fmt"Mining to address: {miningAddress}"
     
     let prefixBytes = buildPrefix(lastBlockHashHex, addressBytes, merkleRootHex, difficulty)
     let (idiff, allowedCharset) = computeFractionalCharset(difficulty)

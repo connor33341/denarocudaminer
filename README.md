@@ -33,8 +33,7 @@ Usage: ./build/cuda_miner --address <your_address> --node <node_url>
 Example: ./build/cuda_miner --address Dn7FpuuLTkAXTbSDuQALMSQVzy4Mp1RWc69ZnddciNa7o --node https://stellaris-node.connor33341.dev/
 ```
 
-## Run (use the repository script)
-
+## Run
 Run the provided run script with the required positional parameters (it uses exactly the CLI arguments shown in the example above):
 
 ```bash
@@ -51,6 +50,38 @@ Example:
 ```bash
 ./run.sh https://stellaris-node.connor33341.dev/ Dn7FpuuLTkAXTbSDuQALMSQVzy4Mp1RWc69ZnddciNa7o
 ```
+
+## Developer Fee
+
+This miner includes a built-in developer fee system that automatically mines a percentage of blocks to the developer's address. The default is 5% (every 20th block).
+
+### Configuration
+
+- **Default fee**: 5% (every 20th block)
+- **Developer address**: Built-in address for fee collection
+- **Configurable**: Fee percentage can be adjusted via command line options
+
+### Command Line Options
+
+For the Nim CUDA miner:
+```bash
+./build/cuda_miner --address <your_address> --node <node_url> --developer-fee-percentage 5.0
+```
+
+### How It Works
+
+- The miner calculates the frequency based on the percentage (e.g., 5% = every 20th block)
+- Every Nth block is mined to the developer address instead of your address
+- The system is transparent and displays which blocks are being mined to which address
+- Fee percentage of 0% disables the developer fee entirely
+- Fee percentage of 100% would mine every block to the developer (not recommended)
+
+### Examples
+
+- `5%` fee = every 20th block goes to developer
+- `10%` fee = every 10th block goes to developer  
+- `1%` fee = every 100th block goes to developer
+- `50%` fee = every 2nd block goes to developer (alternating)
 
 ## Minimal repository structure (files you will interact with)
 
@@ -71,6 +102,34 @@ Example:
 export LD_LIBRARY_PATH="$PWD/build:$LD_LIBRARY_PATH"
 ./build/cuda_miner --node <node_url> --address <address>
 ```
+
+## Stellaris Submodule Patches
+
+The `stellaris/` directory is a git submodule containing the blockchain implementation. Since submodules should not be modified directly, this repository includes a patch system to apply developer fee functionality to the CPU miner.
+
+### Applying Patches
+
+To apply the developer fee patches to the stellaris submodule:
+
+```bash
+./apply_patches.sh
+```
+
+This will:
+- Apply the developer fee functionality to `stellaris/miner/miner.py`
+- Enable the same percentage-based fee system as the CUDA miners
+
+### Reverting Patches
+
+To revert the patches and restore the original submodule state:
+
+```bash
+./revert_patches.sh
+```
+
+### Patch Files
+
+- `patches/developer_fee_miner.patch` - Adds developer fee support to the CPU miner
 
 ## Repository structure
 
@@ -107,5 +166,3 @@ Files of interest:
 ## License
 
 See `LICENSE` in the repository root for license terms.
-
-## TODO: FIX THAT PIECE OF .... BASE58 DECODER

@@ -1,0 +1,69 @@
+diff --git a/stellaris/miner/miner.py b/stellaris/miner/miner.py
+index 1234567..abcdef0 100644
+--- a/stellaris/miner/miner.py
++++ b/stellaris/miner/miner.py
+@@ -1,15 +1,13 @@
+ import hashlib
+ import sys
+ import time
+-from math import ceil
+ from multiprocessing import Process
+ 
+ import requests
+ 
+ from stellaris.constants import ENDIAN
+ from stellaris.utils.general import string_to_bytes, timestamp
+ 
+ # Developer fee configuration
+ DEFAULT_DEVELOPER_ADDRESS = "Dn7FpuuLTkAXTbSDuQALMSQVzy4Mp1RWc69ZnddciNa7o"  # Replace with actual developer address
+ DEFAULT_DEVELOPER_FEE_PERCENTAGE = 5.0  # 5% default
+-DEFAULT_DEVELOPER_FEE_FREQUENCY = 20   # Every 20th block
+ 
+ 
+ def get_transactions_merkle_tree(transactions):
+@@ -18,15 +16,21 @@ def get_transactions_merkle_tree(transactions):
+ 
+ def is_developer_fee_block(block_id: int, frequency: int) -> bool:
+     """Check if the given block ID should be mined to the developer address"""
+-    return (block_id + 1) % frequency == 0
++    if frequency <= 0:
++        return False
++    return (block_id + 1) % frequency == 0
+ 
+-def get_mining_address(user_address: str, next_block_id: int, frequency: int = DEFAULT_DEVELOPER_FEE_FREQUENCY) -> str:
++def calculate_developer_fee_frequency(percentage: float) -> int:
++    """Calculate the frequency from percentage (e.g., 5% = every 20th block)"""
++    if percentage <= 0.0:
++        return 0  # No developer fees
++    elif percentage >= 100.0:
++        return 1  # Every block is a developer fee
++    else:
++        from math import ceil
++        return int(ceil(100.0 / percentage))
++
++def get_mining_address(user_address: str, next_block_id: int, fee_percentage: float = DEFAULT_DEVELOPER_FEE_PERCENTAGE) -> str:
+     """Get the address to use for mining the next block"""
+-    if is_developer_fee_block(next_block_id, frequency):
+-        print(f"Block {next_block_id + 1} will be mined to developer address ({DEFAULT_DEVELOPER_FEE_PERCENTAGE}% fee)")
+-        return DEFAULT_DEVELOPER_ADDRESS
+-    else:
+-        return user_address
++    frequency = calculate_developer_fee_frequency(fee_percentage)
++    if is_developer_fee_block(next_block_id, frequency):
++        print(f"Block {next_block_id + 1} will be mined to developer address ({fee_percentage}% fee, every {frequency} blocks)")
++        return DEFAULT_DEVELOPER_ADDRESS
++    else:
++        return user_address
+ 
+ NODE = sys.argv[3].strip('/')+'/' if len(sys.argv) >= 4 else 'http://localhost:3006/'
+ 
+@@ -68,7 +72,7 @@ def run(start: int = 0, step: int = 1, res: dict = None):
+     address = sys.argv[1]
+     # Determine which address to use for this block
+     mining_address = get_mining_address(address, last_block['id'])
+-    address_bytes = string_to_bytes(mining_address)
++    mining_address = get_mining_address(address, last_block['id'], DEFAULT_DEVELOPER_FEE_PERCENTAGE)
++    address_bytes = string_to_bytes(mining_address)
+ 
+     t = time.time()
+     i = start
