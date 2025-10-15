@@ -44,7 +44,7 @@ const
   STATUS_FAILED = 3
   
     # Developer fee configuration
-  DEFAULT_DEVELOPER_ADDRESS = "Dn7FpuuLTkAXTbSDuQALMSQVzy4Mp1RWc69ZnddciNa7o"  # Replace with actual developer address
+  DEFAULT_DEVELOPER_ADDRESS = "DWMVFcRTZ8UMaWr2vsb7XkTmh7zaA57BQaDRGiAKB6qX6"  # Replace with actual developer address
   DEFAULT_DEVELOPER_FEE_PERCENTAGE = 5.0  # 5% default
 
 type
