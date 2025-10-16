@@ -1,7 +1,7 @@
 ## Benchmarking module for CUDA miner
 ## Provides comprehensive performance metrics collection and reporting
 
-import std/[json, times, strformat, os, tables, math, algorithm, sequtils, strutils]
+import std/[json, times, strformat, math, algorithm, sequtils, strutils]
 
 type
   MiningAttempt* = object

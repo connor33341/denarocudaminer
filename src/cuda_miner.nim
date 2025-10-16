@@ -29,7 +29,7 @@
 ## 
 ## Base58 decoding is handled by calling Python's base58 package for reliability.
 
-import std/[httpclient, json, strformat, times, math, strutils, os, parseopt, algorithm, osproc]
+import std/[httpclient, json, strformat, times, math, strutils, os, parseopt, algorithm, osproc, random]
 import nimcrypto
 import cuda_wrapper
 import benchmark
@@ -37,6 +37,7 @@ import benchmark
 const
   WORKER_REFRESH_SECONDS = 190
   DEFAULT_NODE_URL = "https://stellaris-node.connor33341.dev/"
+  DEFAULT_POOL_URL = "https://stellaris-pool.connor33341.dev" # Remove the end / or err
   
   STATUS_PENDING = 0
   STATUS_SUCCESS = 1
@@ -48,9 +49,17 @@ const
   DEFAULT_DEVELOPER_FEE_PERCENTAGE = 5.0  # 5% default
 
 type
+  MiningMode = enum
+    ModeStandalone
+    ModePool
+
   MinerConfig = object
+    mode: MiningMode
     nodeUrl: string
+    poolUrl: string
     address: string
+    workerName: string
+    minerId: string
     maxBlocks: int
     blocks: uint
     threads: uint
@@ -70,6 +79,17 @@ type
     difficulty: float
     pendingTransactions: seq[string]
     merkleRoot: string
+  
+  PoolWork = object
+    blockHeight: int
+    difficulty: float
+    previousHash: string
+    merkleRoot: string
+    timestamp: int
+    nonceStart: uint32
+    nonceEnd: uint32
+    poolAddress: string
+    transactions: seq[string]
 
 proc base58DecodePython(input: string): seq[byte] =
   ## Base58 decoder using Python base58 package (reliable implementation)
@@ -232,11 +252,246 @@ proc submitBlock(client: HttpClient, nodeUrl: string, lastBlockId: int, txs: seq
     echo fmt"Error submitting block: {getCurrentExceptionMsg()}"
     return STATUS_FAILED
 
+proc registerWithPool(client: HttpClient, poolUrl: string, minerId: string, walletAddress: string, workerName: string): bool =
+  ## Register with the mining pool
+  try:
+    let payload = %*{
+      "miner_id": minerId,
+      "wallet_address": walletAddress,
+      "worker_name": workerName
+    }
+    
+    client.headers["Content-Type"] = "application/json"
+    let response = client.postContent(fmt"{poolUrl}/api/register", $payload)
+    let jsonResponse = parseJson(response)
+    
+    if jsonResponse.hasKey("success") and jsonResponse["success"].getBool():
+      echo fmt"✅ Registered with pool: {minerId}"
+      return true
+    else:
+      echo fmt"❌ Registration failed: {jsonResponse}"
+      return false
+  except Exception as e:
+    echo fmt"❌ Registration error: {e.msg}"
+    return false
+
+proc getPoolWork(client: HttpClient, poolUrl: string, minerId: string): PoolWork =
+  ## Request work from the mining pool
+  try:
+    let payload = %*{
+      "miner_id": minerId
+    }
+    
+    client.headers["Content-Type"] = "application/json"
+    let response = client.postContent(fmt"{poolUrl}/api/work", $payload)
+    let jsonData = parseJson(response)
+    
+    result.blockHeight = jsonData["block_height"].getInt()
+    result.difficulty = jsonData["difficulty"].getFloat()
+    result.previousHash = jsonData["previous_hash"].getStr()
+    result.merkleRoot = jsonData["merkle_root"].getStr()
+    result.timestamp = jsonData["timestamp"].getInt()
+    result.nonceStart = uint32(jsonData["nonce_start"].getBiggestInt())
+    result.nonceEnd = uint32(jsonData["nonce_end"].getBiggestInt())
+    result.poolAddress = jsonData["pool_address"].getStr()
+    result.transactions = @[]
+    for tx in jsonData["transactions"]:
+      result.transactions.add(tx.getStr())
+    
+  except Exception as e:
+    echo fmt"❌ Error getting work: {e.msg}"
+    raise e
+
+proc submitShare(client: HttpClient, poolUrl: string, minerId: string, blockHeight: int,
+                 nonce: uint32, blockContentHex: string, blockHash: string, isValidBlock: bool): bool =
+  ## Submit a valid block to the pool
+  try:
+    let payload = %*{
+      "miner_id": minerId,
+      "block_height": blockHeight,
+      "nonce": nonce,
+      "block_content_hex": blockContentHex,
+      "block_hash": blockHash,
+      "is_valid_block": isValidBlock
+    }
+    
+    client.headers["Content-Type"] = "application/json"
+    let response = client.postContent(fmt"{poolUrl}/api/share", $payload)
+    let jsonResponse = parseJson(response)
+    
+    if jsonResponse.hasKey("block_found") and jsonResponse["block_found"].getBool():
+      echo "🎉🎉🎉 BLOCK FOUND! 🎉🎉🎉"
+      return true
+    return false
+    
+  except Exception as e:
+    echo fmt"❌ Error submitting share: {e.msg}"
+    return false
+
+proc submitWorkProof(client: HttpClient, poolUrl: string, minerId: string, blockHeight: int,
+                     nonceStart: uint32, nonceEnd: uint32, bestNonce: uint32,
+                     bestHash: string, hashesComputed: uint64): bool =
+  ## Submit proof that work was completed
+  try:
+    let payload = %*{
+      "miner_id": minerId,
+      "block_height": blockHeight,
+      "nonce_start": nonceStart,
+      "nonce_end": nonceEnd,
+      "best_nonce": bestNonce,
+      "best_hash": bestHash,
+      "hashes_computed": int(hashesComputed)
+    }
+    
+    client.headers["Content-Type"] = "application/json"
+    let response = client.postContent(fmt"{poolUrl}/api/work_proof", $payload)
+    let jsonResponse = parseJson(response)
+    
+    if jsonResponse.hasKey("success") and jsonResponse["success"].getBool():
+      let workUnits = jsonResponse.getOrDefault("work_units").getInt(0)
+      echo fmt"✅ Work proof accepted ({workUnits} work units this round)"
+      return true
+    else:
+      echo fmt"❌ Work proof rejected: {jsonResponse}"
+      return false
+      
+  except Exception as e:
+    echo fmt"❌ Error submitting work proof: {e.msg}"
+    return false
+
+proc minePoolRange(config: MinerConfig, prefixBytes: seq[byte], lastChunkLc: string,
+                   idiff: uint, allowedCharset: string, nonceStart: uint32, nonceEnd: uint32,
+                   blockHeight: int): tuple[found: bool, nonce: uint32, bestNonce: uint32, bestHash: string, hashesComputed: uint64] =
+  ## Mine a specific nonce range for pool mining
+  ## Returns: (found, nonce, bestNonce, bestHash, hashesComputed)
+  
+  let startTime = epochTime()
+  var foundNonce: uint32 = uint32(0xFFFFFFFF)
+  var totalHashes: uint64 = 0
+  var bestNonce = nonceStart
+  var bestHash = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+  
+  # Calculate total nonces in range
+  let totalNonces = uint64(nonceEnd - nonceStart)
+  let hashesPerBatch = uint64(config.blocks * config.threads * config.itersPerThread)
+  
+  # Calculate number of batches needed to cover the range
+  var batchIdx = 0
+  const TIMEOUT_SECONDS = 280  # Match pool_miner timeout
+  const HASHRATE_CHECK = 5_000_000  # Report every 5M hashes
+  const SAMPLE_INTERVAL = 100_000  # Sample best hash every 100k hashes
+  
+  var lastSampleHashes: uint64 = 0
+  
+  while foundNonce == uint32(0xFFFFFFFF) and (epochTime() - startTime) < TIMEOUT_SECONDS:
+    # Calculate current nonce offset
+    let currentOffset = uint64(batchIdx) * hashesPerBatch
+    if currentOffset >= totalNonces:
+      # Exhausted the range
+      break
+    
+    # Mine this batch - CUDA kernel searches for valid blocks
+    let nonce = mineNonces(
+      cast[seq[uint8]](prefixBytes),
+      lastChunkLc,
+      idiff,
+      allowedCharset,
+      config.blocks,
+      config.threads,
+      config.itersPerThread,
+      uint(batchIdx)
+    )
+    
+    totalHashes += hashesPerBatch
+    
+    # Check if we found a valid block (meets full network difficulty)
+    if nonce != uint32(0xFFFFFFFF):
+      foundNonce = nonce
+      # Calculate hash for the found nonce
+      let nonceBytes = cast[seq[byte]](@[
+        byte(nonce and 0xFF),
+        byte((nonce shr 8) and 0xFF),
+        byte((nonce shr 16) and 0xFF),
+        byte((nonce shr 24) and 0xFF)
+      ])
+      let blockContent = prefixBytes & nonceBytes
+      bestHash = ($sha256.digest(blockContent)).toLower()
+      bestNonce = nonce
+      break
+    
+    # Periodically sample hashes to find the "best" (lowest) hash for proof of work
+    # This shows we actually did the work even if we didn't find a valid block
+    if totalHashes - lastSampleHashes >= SAMPLE_INTERVAL:
+      # Sample a few nonces from the range we just mined
+      let sampleStart = nonceStart + uint32(currentOffset)
+      let sampleEnd = min(sampleStart + 10, nonceEnd)  # Sample 10 nonces
+      
+      for sampleNonce in sampleStart..<sampleEnd:
+        let nonceBytes = cast[seq[byte]](@[
+          byte(sampleNonce and 0xFF),
+          byte((sampleNonce shr 8) and 0xFF),
+          byte((sampleNonce shr 16) and 0xFF),
+          byte((sampleNonce shr 24) and 0xFF)
+        ])
+        let blockContent = prefixBytes & nonceBytes
+        let hash = ($sha256.digest(blockContent)).toLower()
+        
+        # Keep track of lowest (best) hash
+        if hash < bestHash:
+          bestHash = hash
+          bestNonce = sampleNonce
+      
+      lastSampleHashes = totalHashes
+    
+    inc batchIdx
+    
+    # Print hashrate periodically
+    if totalHashes > 0 and totalHashes mod HASHRATE_CHECK == 0:
+      let elapsed = epochTime() - startTime
+      if elapsed > 0:
+        let hashrate = float(totalHashes) / elapsed / 1000.0
+        let progress = (float(currentOffset) / float(totalNonces)) * 100.0
+        echo fmt"Mining: {hashrate:.1f} kH/s ({progress:.1f}% of range, best: {bestHash[0..15]}...)"
+  
+  # Final sample if we didn't find a block
+  if foundNonce == uint32(0xFFFFFFFF):
+    # Sample the last nonces we mined
+    let finalSampleStart = nonceStart + uint32(min(totalHashes, totalNonces) - 10)
+    let finalSampleEnd = min(finalSampleStart + 10, nonceEnd)
+    
+    for sampleNonce in finalSampleStart..<finalSampleEnd:
+      let nonceBytes = cast[seq[byte]](@[
+        byte(sampleNonce and 0xFF),
+        byte((sampleNonce shr 8) and 0xFF),
+        byte((sampleNonce shr 16) and 0xFF),
+        byte((sampleNonce shr 24) and 0xFF)
+      ])
+      let blockContent = prefixBytes & nonceBytes
+      let hash = ($sha256.digest(blockContent)).toLower()
+      
+      if hash < bestHash:
+        bestHash = hash
+        bestNonce = sampleNonce
+  
+  let elapsed = epochTime() - startTime
+  let hashrate = if elapsed > 0: float(totalHashes) / elapsed / 1000.0 else: 0.0
+  
+  if foundNonce != uint32(0xFFFFFFFF):
+    echo fmt"🎉 VALID BLOCK FOUND! Nonce: {foundNonce}, Hash: {bestHash[0..16]}..., Hashrate: {hashrate:.1f} kH/s"
+    result = (true, foundNonce, bestNonce, bestHash, totalHashes)
+  else:
+    echo fmt"Range completed: {hashrate:.1f} kH/s, {totalHashes} hashes, Best hash: {bestHash[0..15]}..."
+    result = (false, foundNonce, bestNonce, bestHash, totalHashes)
+
 proc parseArgs(): MinerConfig =
   ## Parse command line arguments
   result = MinerConfig(
+    mode: ModeStandalone,
     nodeUrl: DEFAULT_NODE_URL,
+    poolUrl: "",
     address: "",
+    workerName: "",
+    minerId: "",
     maxBlocks: 0,
     blocks: 1024,
     threads: 512,
@@ -261,6 +516,16 @@ proc parseArgs(): MinerConfig =
         result.nodeUrl = p.val
         if not result.nodeUrl.endsWith("/"):
           result.nodeUrl.add("/")
+      of "pool":
+        if p.val == "":
+          result.poolUrl = DEFAULT_POOL_URL
+        else:
+          result.poolUrl = p.val
+          if not result.poolUrl.endsWith("/"):
+            result.poolUrl.add("/")
+        result.mode = ModePool
+      of "worker-name":
+        result.workerName = p.val
       of "m", "max-blocks":
         if p.val == "":
           raise newException(ValueError, fmt"Value required for --max-blocks option")
@@ -300,6 +565,8 @@ Usage: cuda_miner [options]
 Options:
   -a, --address <ADDRESS>      Mining address to receive rewards (required)
   -n, --node <URL>             URL of the node API (default: http://127.0.0.1:3006/)
+  --pool [URL]                 Enable pool mining mode (default: https://stellaris-pool.connor33341.dev/)
+  --worker-name <NAME>         Worker name for pool mining (optional)
   -m, --max-blocks <N>         Max number of blocks to mine before exit
   --blocks <N>                 CUDA grid blocks per launch (default: 1024)
   --threads <N>                CUDA threads per block (default: 512)
@@ -319,10 +586,163 @@ Options:
   if result.address == "":
     echo "Error: Mining address is required. Use -a <address> or --address <address>"
     quit(1)
+  
+  # Generate worker name and miner ID for pool mode
+  if result.mode == ModePool:
+    if result.workerName == "":
+      # Generate random worker name
+      randomize()
+      result.workerName = fmt"cuda-worker-{rand(99999999):08x}"
+    
+    # Generate miner ID (first 12 chars of address + worker name)
+    result.minerId = result.address[0..min(11, result.address.len-1)] & "_" & result.workerName
+
+proc minePool(config: MinerConfig) =
+  ## Pool mining mode
+  echo "🌊 Pool Mining Mode"
+  echo fmt"Pool URL: {config.poolUrl}"
+  echo fmt"Miner ID: {config.minerId}"
+  echo fmt"Worker: {config.workerName}"
+  echo fmt"Wallet: {config.address}"
+  
+  # Initialize CUDA
+  echo "Initializing CUDA..."
+  if not initCudaMiner():
+    echo "Failed to initialize CUDA miner"
+    quit(1)
+  echo "CUDA initialized successfully!"
+  
+  var client = newHttpClient(timeout = 30000)  # 30 second timeout
+  
+  # Register with pool
+  echo "Registering with pool..."
+  if not registerWithPool(client, config.poolUrl, config.minerId, config.address, config.workerName):
+    echo "Failed to register with pool. Exiting."
+    quit(1)
+  
+  echo "🚀 Starting pool mining..."
+  
+  while true:
+    try:
+      # Get work from pool
+      echo "Requesting work from pool..."
+      let work = getPoolWork(client, config.poolUrl, config.minerId)
+      
+      echo fmt"📦 Mining block #{work.blockHeight}"
+      echo fmt"   Difficulty: {work.difficulty}"
+      echo fmt"   Nonce range: {work.nonceStart} - {work.nonceEnd}"
+      echo fmt"   Transactions: {work.transactions.len}"
+      
+      # Validate nonce range
+      if work.nonceStart < 0 or work.nonceEnd < 0:
+        echo "❌ Invalid nonce range (negative values)"
+        sleep(5000)
+        continue
+      
+      if work.nonceEnd > uint32.high:
+        echo fmt"❌ Nonce range exceeds 32-bit limit"
+        sleep(5000)
+        continue
+      
+      # Prepare mining
+      var addressBytes: seq[byte]
+      try:
+        addressBytes = stringToBytes(work.poolAddress)
+      except Exception as e:
+        echo fmt"ERROR converting pool address: {e.msg}"
+        sleep(5000)
+        continue
+      
+      # Build prefix with pool's timestamp
+      let lastBlockHash = cast[seq[byte]](work.previousHash.parseHexStr())
+      let merkleRoot = cast[seq[byte]](work.merkleRoot.parseHexStr())
+      let difficultyScaled = uint16(work.difficulty * 10)
+      let timestamp = uint32(work.timestamp)
+      
+      # Build base prefix
+      var prefixBytes = lastBlockHash & 
+                        addressBytes & 
+                        merkleRoot & 
+                        cast[seq[byte]](@[
+                          byte(timestamp and 0xFF),
+                          byte((timestamp shr 8) and 0xFF), 
+                          byte((timestamp shr 16) and 0xFF),
+                          byte((timestamp shr 24) and 0xFF)
+                        ]) &
+                        cast[seq[byte]](@[
+                          byte(difficultyScaled and 0xFF),
+                          byte((difficultyScaled shr 8) and 0xFF)
+                        ])
+      
+      # Add leading byte if address is 33 bytes (compressed public key)
+      if addressBytes.len == 33:
+        prefixBytes = @[byte(2)] & prefixBytes
+      
+      let (idiff, allowedCharset) = computeFractionalCharset(work.difficulty)
+      let lastChunkLc = makeLastBlockChunk(work.previousHash, idiff)
+      
+      # Mine the assigned range
+      let result = minePoolRange(
+        config,
+        prefixBytes,
+        lastChunkLc,
+        idiff,
+        allowedCharset,
+        work.nonceStart,
+        work.nonceEnd,
+        work.blockHeight
+      )
+      
+      if result.found:
+        # Valid block found!
+        let nonceBytes = cast[seq[byte]](@[
+          byte(result.nonce and 0xFF),
+          byte((result.nonce shr 8) and 0xFF),
+          byte((result.nonce shr 16) and 0xFF),
+          byte((result.nonce shr 24) and 0xFF)
+        ])
+        let blockContent = prefixBytes & nonceBytes
+        let blockContentHex = toHex(blockContent).toLower()
+        
+        discard submitShare(
+          client,
+          config.poolUrl,
+          config.minerId,
+          work.blockHeight,
+          result.nonce,
+          blockContentHex,
+          result.bestHash,
+          true  # is_valid_block
+        )
+      else:
+        # Range completed, submit work proof
+        discard submitWorkProof(
+          client,
+          config.poolUrl,
+          config.minerId,
+          work.blockHeight,
+          work.nonceStart,
+          work.nonceEnd,
+          result.bestNonce,
+          result.bestHash,
+          result.hashesComputed
+        )
+      
+    except Exception as e:
+      echo fmt"❌ Error: {e.msg}"
+      echo "   Retrying in 5 seconds..."
+      sleep(5000)
+      sleep(5000)
 
 proc main() =
   let config = parseArgs()
   
+  # Check if pool mode
+  if config.mode == ModePool:
+    minePool(config)
+    return
+  
+  # Standalone mining mode
   echo fmt"Starting CUDA miner for address: {config.address}"
   echo fmt"Connecting to node: {config.nodeUrl}"
   echo fmt"GPU launch dims: blocks={config.blocks}, threads={config.threads}, iters_per_thread={config.itersPerThread}"
