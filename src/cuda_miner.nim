@@ -375,6 +375,11 @@ proc minePoolRange(config: MinerConfig, prefixBytes: seq[byte], lastChunkLc: str
   let totalNonces = uint64(nonceEnd - nonceStart)
   let hashesPerBatch = uint64(config.blocks * config.threads * config.itersPerThread)
   
+  # Calculate the base offset to shift CUDA kernel search into our assigned range
+  # The CUDA kernel calculates: nonce = start_offset + tid + base_offset
+  # We want it to search [nonceStart, nonceEnd), so we set base_offset accordingly
+  let kernelBaseOffset = uint32(nonceStart)
+  
   # Calculate number of batches needed to cover the range
   var batchIdx = 0
   const TIMEOUT_SECONDS = 280  # Match pool_miner timeout
@@ -384,13 +389,21 @@ proc minePoolRange(config: MinerConfig, prefixBytes: seq[byte], lastChunkLc: str
   var lastSampleHashes: uint64 = 0
   
   while foundNonce == uint32(0xFFFFFFFF) and (epochTime() - startTime) < TIMEOUT_SECONDS:
-    # Calculate current nonce offset
+    # Calculate current nonce offset within our range
     let currentOffset = uint64(batchIdx) * hashesPerBatch
     if currentOffset >= totalNonces:
       # Exhausted the range
       break
     
+    # Adjust the batch offset for CUDA - it needs to know how many iterations
+    # from the start of our range (nonceStart) we are
+    # CUDA calculates: base_offset + (batch_offset * iters_per_thread * global_step)
+    # But base_offset is added in the kernel, so we pass batchIdx for the iteration count
+    
     # Mine this batch - CUDA kernel searches for valid blocks
+    # Note: The CUDA kernel uses: nonce = start_offset + tid + base_offset + (batch_offset * iters * global_step)
+    # Since base_offset in CUDA is set to batch_offset * iters * global_step,
+    # we need to calculate the starting nonce for this batch correctly
     let nonce = mineNonces(
       cast[seq[uint8]](prefixBytes),
       lastChunkLc,
@@ -399,25 +412,30 @@ proc minePoolRange(config: MinerConfig, prefixBytes: seq[byte], lastChunkLc: str
       config.blocks,
       config.threads,
       config.itersPerThread,
-      uint(batchIdx)
+      uint(batchIdx) + uint(kernelBaseOffset div hashesPerBatch)  # Shift into our assigned range
     )
     
     totalHashes += hashesPerBatch
     
     # Check if we found a valid block (meets full network difficulty)
     if nonce != uint32(0xFFFFFFFF):
-      foundNonce = nonce
-      # Calculate hash for the found nonce
-      let nonceBytes = cast[seq[byte]](@[
-        byte(nonce and 0xFF),
-        byte((nonce shr 8) and 0xFF),
-        byte((nonce shr 16) and 0xFF),
-        byte((nonce shr 24) and 0xFF)
-      ])
-      let blockContent = prefixBytes & nonceBytes
-      bestHash = ($sha256.digest(blockContent)).toLower()
-      bestNonce = nonce
-      break
+      # Verify the nonce is actually in our assigned range
+      if nonce >= nonceStart and nonce < nonceEnd:
+        foundNonce = nonce
+        # Calculate hash for the found nonce
+        let nonceBytes = cast[seq[byte]](@[
+          byte(nonce and 0xFF),
+          byte((nonce shr 8) and 0xFF),
+          byte((nonce shr 16) and 0xFF),
+          byte((nonce shr 24) and 0xFF)
+        ])
+        let blockContent = prefixBytes & nonceBytes
+        bestHash = ($sha256.digest(blockContent)).toLower()
+        bestNonce = nonce
+        break
+      else:
+        # Nonce outside our range, ignore it (shouldn't happen but be safe)
+        echo fmt"Warning: Found nonce {nonce} outside assigned range [{nonceStart}, {nonceEnd})"
     
     # Periodically sample hashes to find the "best" (lowest) hash for proof of work
     # This shows we actually did the work even if we didn't find a valid block
@@ -448,6 +466,10 @@ proc minePoolRange(config: MinerConfig, prefixBytes: seq[byte], lastChunkLc: str
     # Print hashrate periodically
     if totalHashes > 0 and totalHashes mod HASHRATE_CHECK == 0:
       let elapsed = epochTime() - startTime
+      if elapsed > 0:
+        let hashrate = float(totalHashes) / elapsed / 1000.0
+        let progress = (float(currentOffset) / float(totalNonces)) * 100.0
+        echo fmt"Mining: {hashrate:.1f} kH/s ({progress:.1f}% of range, best: {bestHash[0..15]}...)"
       if elapsed > 0:
         let hashrate = float(totalHashes) / elapsed / 1000.0
         let progress = (float(currentOffset) / float(totalNonces)) * 100.0
@@ -622,6 +644,8 @@ proc minePool(config: MinerConfig) =
   
   echo "🚀 Starting pool mining..."
   
+  var lastBlockHeight = -1  # Track last block we worked on
+  
   while true:
     try:
       # Get work from pool
@@ -704,7 +728,7 @@ proc minePool(config: MinerConfig) =
         let blockContent = prefixBytes & nonceBytes
         let blockContentHex = toHex(blockContent).toLower()
         
-        discard submitShare(
+        let blockFound = submitShare(
           client,
           config.poolUrl,
           config.minerId,
@@ -714,9 +738,15 @@ proc minePool(config: MinerConfig) =
           result.bestHash,
           true  # is_valid_block
         )
+        
+        # If block was actually found and accepted, wait a bit for the network to process it
+        if blockFound:
+          lastBlockHeight = work.blockHeight
+          echo "⏳ Waiting for network to process block..."
+          sleep(5000)  # Wait 5 seconds before requesting new work
       else:
         # Range completed, submit work proof
-        discard submitWorkProof(
+        let proofAccepted = submitWorkProof(
           client,
           config.poolUrl,
           config.minerId,
