@@ -2,6 +2,9 @@
 
 This project provides a CUDA-based miner and a small Nim integration. The only supported build/run entrypoints described here are the repo scripts `compile.sh` and `run.sh`.
 
+> [!warning]
+> When running it is highly recommended to use the `--pool` flag. Without mining in a pool, your odds of finding a block are very slim. Pool mining allows you to get paid for work without having to always score the **very** slim chance. Default pool: https://stellaris-pool.connor33341.dev
+
 ## Requirements
 
 - NVIDIA CUDA toolkit (nvcc) available on PATH
@@ -48,7 +51,7 @@ Notes about `run.sh` defaults and behavior:
 Example:
 
 ```bash
-./run.sh https://stellaris-node.connor33341.dev/ Dn7FpuuLTkAXTbSDuQALMSQVzy4Mp1RWc69ZnddciNa7o
+./run.sh https://stellaris-node.connor33341.dev/ Dn7FpuuLTkAXTbSDuQALMSQVzy4Mp1RWc69ZnddciNa7o --pool
 ```
 
 ## Developer Fee
